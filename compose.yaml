@@ -1,0 +1,42 @@
+name: agent-gateway-mvp
+
+x-gateway: &gateway
+  build: .
+  environment:
+    DATABASE_URL: postgres://gateway:local-demo-password@db:5432/gateway?sslmode=disable
+    AGENT_TOKEN: local-demo-agent-token
+    ADMIN_TOKEN: local-demo-admin-token
+    LISTEN_ADDR: :8080
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: local-demo-password
+      POSTGRES_DB: gateway
+    volumes:
+      - data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U gateway -d gateway]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+  gateway-a:
+    <<: *gateway
+    ports: ["127.0.0.1:8081:8080"]
+  gateway-b:
+    <<: *gateway
+    ports: ["127.0.0.1:8082:8080"]
+  lb:
+    image: nginx:1.28-alpine
+    ports: ["127.0.0.1:8080:80"]
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [gateway-a, gateway-b]
+
+volumes:
+  data:
