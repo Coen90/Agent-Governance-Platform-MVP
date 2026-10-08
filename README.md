@@ -1,4 +1,4 @@
-# Agent Governance Platform MvVP
+# Agent Governance Platform MVP
 
 **에이전트가 사용자를 대신해 허용된 도구만 실행하도록 하는 작은 Go API입니다.**
 
