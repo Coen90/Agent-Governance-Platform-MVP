@@ -24,6 +24,23 @@ Agent → LB :8080 ───┤                     ├─ PostgreSQL
 
 `docker compose down`으로 종료합니다. DB는 볼륨에 보존됩니다.
 
+## 패키지 구조
+
+```text
+cmd/gateway/main.go       # 설정과 의존성 연결, HTTP 서버 실행
+internal/
+  config/                # 환경변수 로딩과 검증
+  governance/            # 요청 모델, 행동·상태 상수, 도메인 오류
+  httpapi/               # 라우팅, 인증, 입력 검증, HTTP 응답
+  postgres/              # DB 초기화, 위임 검사, 요청 트랜잭션, 감사·모의 도구
+    schema.sql           # 바이너리에 포함되는 스키마와 데모 데이터
+```
+
+HTTP 핸들러는 저장소 인터페이스에 의존합니다. SQL과 행 잠금은 `internal/postgres`에서 관리하고,
+위임 검사·모의 실행·결과·감사 기록을 하나의 트랜잭션으로 처리합니다.
+
+로컬 바이너리 빌드는 `go build -o gateway ./cmd/gateway`, 직접 실행은 환경변수를 설정한 뒤 `go run ./cmd/gateway`로 합니다.
+
 ## 아주 작은 권한 모델
 
 - `AGENT_TOKEN`은 `demo-agent`에 연결되고, DB의 위임 정보는 사용자를 `demo-user`로 식별합니다.

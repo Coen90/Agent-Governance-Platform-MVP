@@ -1,4 +1,4 @@
-package main
+package httpapi_test
 
 import (
 	"bytes"
@@ -15,6 +15,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"agent-gateway-mvp/internal/governance"
+	"agent-gateway-mvp/internal/httpapi"
+	"agent-gateway-mvp/internal/postgres"
 )
 
 func TestGatewayAcrossInstances(t *testing.T) {
@@ -53,16 +57,16 @@ func TestGatewayAcrossInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-	if err := initialize(context.Background(), db); err != nil {
+	if err := postgres.Initialize(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
-	a := &app{db: db, agentToken: "test-agent-token-123", adminToken: "test-admin-token-123"}
-	b := &app{db: db2, agentToken: a.agentToken, adminToken: a.adminToken}
-	sa, sb := httptest.NewServer(a.handler()), httptest.NewServer(b.handler())
+	agentToken, adminToken := "test-agent-token-123", "test-admin-token-123"
+	sa := httptest.NewServer(httpapi.NewHandler(postgres.New(db), agentToken, adminToken))
+	sb := httptest.NewServer(httpapi.NewHandler(postgres.New(db2), agentToken, adminToken))
 	defer sa.Close()
 	defer sb.Close()
 
-	call := func(base, method, path, token, key, body string, want int) request {
+	call := func(base, method, path, token, key, body string, want int) governance.Request {
 		t.Helper()
 		req, err := http.NewRequest(method, base+path, bytes.NewBufferString(body))
 		if err != nil {
@@ -82,7 +86,7 @@ func TestGatewayAcrossInstances(t *testing.T) {
 		if resp.StatusCode != want {
 			t.Fatalf("%s %s: got %d, want %d: %s", method, path, resp.StatusCode, want, data)
 		}
-		var v request
+		var v governance.Request
 		if want < 300 {
 			if err := json.Unmarshal(data, &v); err != nil {
 				t.Fatal(err)
@@ -94,26 +98,26 @@ func TestGatewayAcrossInstances(t *testing.T) {
 	restart := `{"action":"service.restart","service":"payments"}`
 	read := `{"action":"logs.read","service":"payments"}`
 	call(sa.URL, "POST", "/requests", "bad", "bad-token", restart, 401)
-	call(sa.URL, "POST", "/requests", a.agentToken, "bad-scope", `{"action":"logs.read","service":"other"}`, 403)
-	call(sa.URL, "POST", "/requests", a.agentToken, "bad-action", `{"action":"service.delete","service":"payments"}`, 403)
-	call(sa.URL, "POST", "/requests", a.agentToken, "spoof", `{"action":"logs.read","service":"payments","user_id":"admin"}`, 400)
-	call(sa.URL, "POST", "/requests", a.agentToken, "bad-json", read+read, 400)
-	call(sa.URL, "POST", "/requests", a.agentToken, "", restart, 400)
-	v := call(sa.URL, "POST", "/requests", a.agentToken, "restart-1", restart, 201)
+	call(sa.URL, "POST", "/requests", agentToken, "bad-scope", `{"action":"logs.read","service":"other"}`, 403)
+	call(sa.URL, "POST", "/requests", agentToken, "bad-action", `{"action":"service.delete","service":"payments"}`, 403)
+	call(sa.URL, "POST", "/requests", agentToken, "spoof", `{"action":"logs.read","service":"payments","user_id":"admin"}`, 400)
+	call(sa.URL, "POST", "/requests", agentToken, "bad-json", read+read, 400)
+	call(sa.URL, "POST", "/requests", agentToken, "", restart, 400)
+	v := call(sa.URL, "POST", "/requests", agentToken, "restart-1", restart, 201)
 	if v.Status != "pending" || v.UserID != "demo-user" || v.AgentID != "demo-agent" {
 		t.Fatalf("unexpected request identity/state: %+v", v)
 	}
-	duplicate := call(sb.URL, "POST", "/requests", a.agentToken, "restart-1", restart, 200)
+	duplicate := call(sb.URL, "POST", "/requests", agentToken, "restart-1", restart, 200)
 	if duplicate.ID != v.ID {
 		t.Fatal("retry created a second request")
 	}
-	call(sb.URL, "POST", "/requests", a.agentToken, "restart-1", read, 409)
+	call(sb.URL, "POST", "/requests", agentToken, "restart-1", read, 409)
 	path := "/requests/" + v.ID
-	call(sb.URL, "POST", path+"/execute", a.agentToken, "", "", 409)
-	call(sa.URL, "POST", path+"/approve", a.agentToken, "", "", 401)
-	call(sa.URL, "POST", path+"/execute", a.adminToken, "", "", 401)
-	call(sb.URL, "POST", path+"/approve", a.adminToken, "", "", 200)
-	call(sa.URL, "POST", path+"/approve", a.adminToken, "", "", 200)
+	call(sb.URL, "POST", path+"/execute", agentToken, "", "", 409)
+	call(sa.URL, "POST", path+"/approve", agentToken, "", "", 401)
+	call(sa.URL, "POST", path+"/execute", adminToken, "", "", 401)
+	call(sb.URL, "POST", path+"/approve", adminToken, "", "", 200)
+	call(sa.URL, "POST", path+"/approve", adminToken, "", "", 200)
 
 	var wg sync.WaitGroup
 	for i := range 16 {
@@ -122,7 +126,7 @@ func TestGatewayAcrossInstances(t *testing.T) {
 			if i%2 == 1 {
 				base = sb.URL
 			}
-			done := call(base, "POST", path+"/execute", a.agentToken, "", "", 200)
+			done := call(base, "POST", path+"/execute", agentToken, "", "", 200)
 			var result struct {
 				Count int  `json:"restart_count"`
 				Mock  bool `json:"simulated"`
@@ -142,13 +146,13 @@ func TestGatewayAcrossInstances(t *testing.T) {
 			t.Fatalf("%s audit count %d, error %v", event, count, err)
 		}
 	}
-	call(sb.URL, "GET", path, a.agentToken, "", "", 200)
-	call(sa.URL, "GET", "/requests/missing", a.agentToken, "", "", 404)
-	logs := call(sa.URL, "POST", "/requests", a.agentToken, "read-1", read, 201)
-	call(sb.URL, "POST", "/requests/"+logs.ID+"/execute", a.agentToken, "", "", 200)
+	call(sb.URL, "GET", path, agentToken, "", "", 200)
+	call(sa.URL, "GET", "/requests/missing", agentToken, "", "", 404)
+	logs := call(sa.URL, "POST", "/requests", agentToken, "read-1", read, 201)
+	call(sb.URL, "POST", "/requests/"+logs.ID+"/execute", agentToken, "", "", 200)
 
-	pending := call(sa.URL, "POST", "/requests", a.agentToken, "restart-2", restart, 201)
-	call(sb.URL, "POST", "/requests/"+pending.ID+"/approve", a.adminToken, "", "", 200)
+	pending := call(sa.URL, "POST", "/requests", agentToken, "restart-2", restart, 201)
+	call(sb.URL, "POST", "/requests/"+pending.ID+"/approve", adminToken, "", "", 200)
 	for i, mutation := range []string{
 		"active = false", "expires_at = now() - interval '1 second'",
 		"actions = ARRAY['logs.read']", "user_id = 'someone-else'",
@@ -157,23 +161,23 @@ func TestGatewayAcrossInstances(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i == 0 {
-			if err := initialize(context.Background(), db2); err != nil {
+			if err := postgres.Initialize(context.Background(), db2); err != nil {
 				t.Fatal(err)
 			}
 		}
-		call(sb.URL, "POST", "/requests/"+pending.ID+"/execute", a.agentToken, "", "", 403)
+		call(sb.URL, "POST", "/requests/"+pending.ID+"/execute", agentToken, "", "", 403)
 		if i != 3 {
-			call(sa.URL, "POST", "/requests", a.agentToken, fmt.Sprintf("revoked-%d", i), restart, 403)
+			call(sa.URL, "POST", "/requests", agentToken, fmt.Sprintf("revoked-%d", i), restart, 403)
 		}
 		if _, err := db.Exec("UPDATE delegations SET active = true, expires_at = now() + interval '1 hour', actions = ARRAY['logs.read','service.restart'], user_id = 'demo-user'"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := initialize(context.Background(), db2); err != nil {
+	if err := postgres.Initialize(context.Background(), db2); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	call(sa.URL, "POST", "/requests/"+pending.ID+"/execute", a.agentToken, "", "", 503)
+	call(sa.URL, "POST", "/requests/"+pending.ID+"/execute", agentToken, "", "", 503)
 }
